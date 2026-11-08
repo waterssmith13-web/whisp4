@@ -92,7 +92,7 @@ async def inline_handler(inline_query: types.InlineQuery):
     )
     
     # Direct Deep-Link URL structure instead of breaking callback configurations
-    redirect_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
+    redirect_url = f"https://t.me/{BOT_USERNAME}?start={whisper_id}"
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="🔒🔑", url=redirect_url)]
     ])
