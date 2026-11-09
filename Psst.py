@@ -15,10 +15,14 @@ WHISPER_BOT_TOKEN = os.getenv("WHISPER_BOT_TOKEN")
 if not WHISPER_BOT_TOKEN:
     raise RuntimeError("Set the WHISPER_BOT_TOKEN environment variable.")
 
-DB_PATH = os.getenv(
-    "WHISPERS_DB_PATH",
-    str(Path(__file__).resolve().with_name("whispers.db")),
+DEFAULT_DB_PATH = (
+    Path("/data/whispers.db")
+    if Path("/data").is_dir()
+    else Path(__file__).resolve().with_name("whispers.db")
 )
+DB_PATH = Path(
+    os.getenv("WHISPERS_DB_PATH", str(DEFAULT_DB_PATH))
+).expanduser().resolve()
 MAX_WHISPER_CHARS = 4000
 WHISPER_LIFETIME_SECONDS = 24 * 60 * 60
 BOT_USERNAME = ""
@@ -79,7 +83,7 @@ def split_message(text: str, max_units: int = 3900) -> list[str]:
 def read_whisper_keyboard(whisper_id: str) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[[
         types.InlineKeyboardButton(
-            text="Read privately",
+            text="🔐 Read whisper privately",
             url=f"https://t.me/{BOT_USERNAME}?start=whisper_{whisper_id}",
         )
     ]])
@@ -98,7 +102,12 @@ async def get_whisper(whisper_id: str):
 async def send_whisper(chat_id: int, whisper_id: str, user: types.User) -> bool:
     row = await get_whisper(whisper_id)
     if not row:
-        await bot.send_message(chat_id, "This whisper does not exist.")
+        print(f"Whisper {whisper_id} not found in database {DB_PATH}")
+        await bot.send_message(
+            chat_id,
+            "I couldn't find this whisper in my database. It may be an old "
+            "card or the database was lost. Ask the sender to create a new card.",
+        )
         return False
 
     _, sender_username, target_username, secret_text, expires_at = row
@@ -206,7 +215,7 @@ async def receive_whisper_text(message: types.Message):
         return
 
     target_username = pending[0]
-    whisper_id = secrets.token_urlsafe(8)
+    whisper_id = secrets.token_hex(8)
     expires_at = int(time.time()) + WHISPER_LIFETIME_SECONDS
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -264,7 +273,7 @@ async def inline_handler(inline_query: types.InlineQuery):
             await inline_query.answer([], cache_time=0, is_personal=True)
             return
 
-        whisper_id = secrets.token_urlsafe(8)
+        whisper_id = secrets.token_hex(8)
         expires_at = int(time.time()) + WHISPER_LIFETIME_SECONDS
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
@@ -285,8 +294,8 @@ async def inline_handler(inline_query: types.InlineQuery):
 
     result = types.InlineQueryResultArticle(
         id=whisper_id,
-        title=f"Private whisper for @{target_username}",
-        description="Tap this card to send it. Only the recipient can read it.",
+        title=f"🔒 Send whisper to @{target_username}",
+        description="Tap to post • Only the recipient can read it",
         input_message_content=types.InputTextMessageContent(
             message_text=(
                 f"A private whisper for @{target_username}.\n"
@@ -303,7 +312,12 @@ async def handle_legacy_whisper_click(callback: types.CallbackQuery):
     whisper_id = callback.data.split(":", 1)[1]
     row = await get_whisper(whisper_id)
     if not row:
-        await callback.answer("This whisper does not exist.", show_alert=True)
+        print(f"Whisper {whisper_id} not found in database {DB_PATH}")
+        await callback.answer(
+            "This whisper is missing from the bot's database. Ask the sender "
+            "to create a new card.",
+            show_alert=True,
+        )
         return
 
     _, _, target_username, _, expires_at = row
@@ -345,6 +359,7 @@ async def main():
         raise RuntimeError("Telegram did not return a username for this bot.")
     BOT_USERNAME = bot_info.username
     print(f"Whisper bot @{BOT_USERNAME} is running.")
+    print(f"Using whisper database: {DB_PATH}")
 
     try:
         await dp.start_polling(bot)
