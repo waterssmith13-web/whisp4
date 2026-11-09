@@ -140,75 +140,30 @@ async def handle_start(message: types.Message, command: CommandObject):
         return
 
     await message.answer(
-        "Welcome to Psst!\n\n"
-        "Create a private whisper:\n"
-        "/whisper @username\n"
-        "Then send your secret as your next message (up to 4,000 characters).\n\n"
-        "The bot will give you a button to share in a group. The recipient can "
-        "tap Read privately to open this bot and read the whisper. Whispers are "
-        "available for 24 hours and can be reopened during that time.\n\n"
-        "Use /help for instructions or /cancel to cancel a draft."
+        f"Welcome to Psst! Use @{BOT_USERNAME} @username your message in any chat "
+        "to create a whisper card. Tap the card to post it in the chat.\n\n"
+        "For a longer message (up to 4,000 characters), send @username here, "
+        "then send the secret as your next message. I will give you a card to "
+        "share into a group.\n\n"
+        "The intended recipient taps Read privately. They can read it again "
+        "for 24 hours. Use /help for instructions."
     )
 
 
 @dp.message(Command("help"))
 async def handle_help(message: types.Message):
     await message.answer(
-        "How to send a whisper:\n"
-        "1. Open this bot's private chat and send /whisper @username.\n"
-        "2. Send the secret as your next message (up to 4,000 characters).\n"
-        "3. Tap Share to a chat and choose the group where you want to post it.\n"
-        "4. The intended recipient taps Read privately. If Telegram asks, they "
-        "must press Start in this bot the first time.\n\n"
-        "If inline results do not appear, ask the bot owner to enable inline "
-        "mode for this bot with /setinline in @BotFather.\n"
-        "Only the matching Telegram username can read it. The recipient can "
-        "open it again for 24 hours. Use /cancel to discard a draft."
+        f"Short whispers: type @{BOT_USERNAME} @username your message in any "
+        "chat. Tap the result card to post it there.\n\n"
+        "Long whispers (up to 4,000 characters): in this private chat, send "
+        "@username, then send the secret as your next message. Tap Share to a "
+        "chat and choose a group; tap the result card to post it.\n\n"
+        "The recipient taps Read privately. They may need to press Start in "
+        "this bot the first time. Only the matching Telegram username can "
+        "read the whisper, and it can be reopened for 24 hours.\n\n"
+        "Inline mode must be enabled by the bot owner with /setinline in "
+        "@BotFather."
     )
-
-
-@dp.message(Command("whisper"))
-async def handle_whisper_command(
-    message: types.Message,
-    command: CommandObject,
-):
-    if message.chat.type != "private":
-        await message.answer("Please create whispers in this bot's private chat.")
-        return
-
-    args = command.args or ""
-    target_arg = args.split(maxsplit=1)[0] if args else ""
-    target_username = normalize_username(target_arg)
-    if not target_username:
-        await message.answer(
-            "Usage: /whisper @username\n"
-            "The recipient must have a Telegram username."
-        )
-        return
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """INSERT OR REPLACE INTO pending_whispers (user_id, target_username)
-               VALUES (?, ?)""",
-            (message.from_user.id, target_username),
-        )
-        await db.commit()
-
-    await message.answer(
-        f"Send the secret for @{target_username} as your next message "
-        f"(up to {MAX_WHISPER_CHARS:,} characters). Send /cancel to stop."
-    )
-
-
-@dp.message(Command("cancel"))
-async def handle_cancel(message: types.Message):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "DELETE FROM pending_whispers WHERE user_id = ?",
-            (message.from_user.id,),
-        )
-        await db.commit()
-    await message.answer("Whisper draft cancelled.")
 
 
 @dp.message(F.chat.type == "private", F.text)
@@ -224,6 +179,19 @@ async def receive_whisper_text(message: types.Message):
             pending = await cursor.fetchone()
 
     if not pending:
+        target_username = normalize_username(message.text)
+        if target_username:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    """INSERT OR REPLACE INTO pending_whispers
+                       (user_id, target_username) VALUES (?, ?)""",
+                    (message.from_user.id, target_username),
+                )
+                await db.commit()
+            await message.answer(
+                f"Now send the secret for @{target_username} "
+                f"(up to {MAX_WHISPER_CHARS:,} characters)."
+            )
         return
 
     secret_text = message.text
@@ -277,25 +245,48 @@ async def receive_whisper_text(message: types.Message):
 @dp.inline_query()
 async def inline_handler(inline_query: types.InlineQuery):
     query = inline_query.query.strip()
-    if not query.startswith("share_"):
-        await inline_query.answer([], cache_time=0, is_personal=True)
-        return
+    if query.startswith("share_"):
+        whisper_id = query.removeprefix("share_")
+        row = await get_whisper(whisper_id)
+        if not row:
+            await inline_query.answer([], cache_time=0, is_personal=True)
+            return
 
-    whisper_id = query.removeprefix("share_")
-    row = await get_whisper(whisper_id)
-    if not row:
-        await inline_query.answer([], cache_time=0, is_personal=True)
-        return
+        sender_id, _, target_username, _, expires_at = row
+        if sender_id != inline_query.from_user.id or int(time.time()) > expires_at:
+            await inline_query.answer([], cache_time=0, is_personal=True)
+            return
+    else:
+        parts = query.split(maxsplit=1)
+        target_username = normalize_username(parts[0]) if parts else None
+        secret_text = parts[1].strip() if len(parts) == 2 else ""
+        if not target_username or not secret_text:
+            await inline_query.answer([], cache_time=0, is_personal=True)
+            return
 
-    sender_id, _, target_username, _, expires_at = row
-    if sender_id != inline_query.from_user.id or int(time.time()) > expires_at:
-        await inline_query.answer([], cache_time=0, is_personal=True)
-        return
+        whisper_id = secrets.token_urlsafe(8)
+        expires_at = int(time.time()) + WHISPER_LIFETIME_SECONDS
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT INTO whispers
+                   (whisper_id, sender_id, sender_username, target_username,
+                    secret_text, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    whisper_id,
+                    inline_query.from_user.id,
+                    inline_query.from_user.username,
+                    target_username,
+                    secret_text,
+                    expires_at,
+                ),
+            )
+            await db.commit()
 
     result = types.InlineQueryResultArticle(
         id=whisper_id,
         title=f"Private whisper for @{target_username}",
-        description="Only the intended recipient can open it.",
+        description="Tap this card to send it. Only the recipient can read it.",
         input_message_content=types.InputTextMessageContent(
             message_text=(
                 f"A private whisper for @{target_username}.\n"
